@@ -1,0 +1,180 @@
+﻿// Each #kernel tells which function to compile; you can have many kernels
+#pragma kernel CSMain
+
+// Create a RenderTexture with enableRandomWrite flag and set it
+// with cs.SetTexture
+RWTexture2D<float4> Result;
+// camera to world
+float4x4 _C2W;
+// camera projection inverse
+float4x4 _IP;
+// sky box
+Texture2D<float4> _SkyboxTex;
+SamplerState sampler_SkyboxTex;
+float2 _PixelOffset;
+// light
+float4 _DirectionalLight;
+
+static const float PI = 3.14159265f;
+
+struct Ray
+{
+    float3 ori;
+    float3 dir;
+    // energy
+    float3 e;
+};
+
+struct RayHit
+{
+    float3 pos;
+    float dis;
+    float3 normal;
+    float3 albedo;
+    float3 spec;
+};
+
+struct Sphere
+{
+    float3 pos;
+    // radius
+    float r;
+    float3 albedo;
+    float3 spec;
+};
+
+// spheres
+StructuredBuffer<Sphere> _Spheres;
+
+inline Ray CreateRay(float3 ori, float3 dir)
+{
+    Ray ray;
+    ray.ori = ori;
+    ray.dir = dir;
+    ray.e = 1.0f;
+
+    return ray;
+}
+
+inline Ray CreateCameraRay(float2 uv)
+{
+    float3 ori = mul(_C2W, float4(0.0f, 0.0f, 0.0f, 1.0f)).xyz;
+    float3 dir = mul(_IP, float4(uv, 0.0f, 1.0f)).xyz;
+    dir = mul(_C2W, float4(dir, 0.0f)).xyz;
+    dir = normalize(dir);
+
+    return CreateRay(ori, dir);
+}
+
+inline RayHit CreateRayHit()
+{
+    RayHit hit;
+    hit.pos = 0.0f;
+    hit.dis = 1.#INF;
+    hit.normal = 0.0f;
+
+    return hit;
+}
+
+inline void IntersectGroundPlane(Ray ray, inout RayHit hit)
+{
+    float t = -ray.ori.y / ray.dir.y;
+    if (t > 0 && t < hit.dis)
+    {
+        hit.dis = t;
+        hit.pos = ray.ori + t * ray.dir;
+        hit.normal = float3(0.0f, 1.0f, 0.0f);
+        hit.albedo = 1;
+        hit.spec = 0;
+    }
+}
+
+inline void IntersectSphere(Ray ray, inout RayHit hit, Sphere sphere)
+{
+    float3 d = ray.ori - sphere.pos;
+    float p1 = -dot(ray.dir, d);
+    float p2sqr = p1 * p1 - dot(d, d) + sphere.r * sphere.r;
+    if (p2sqr < 0)
+        return;
+
+    float p2 = sqrt(p2sqr);
+    float t = p1 - p2 > 0 ? p1 - p2 : p1 + p2;
+    if (t > 0 && t < hit.dis)
+    {
+        hit.dis = t;
+        hit.pos = ray.ori + t * ray.dir;
+        hit.normal = normalize(hit.pos - sphere.pos);
+        hit.albedo = sphere.albedo;
+        hit.spec = sphere.spec;
+    }
+}
+
+inline RayHit Trace(Ray ray)
+{
+    RayHit hit = CreateRayHit();
+
+    uint num, stride;
+    _Spheres.GetDimensions(num, stride);
+    for (uint i = 0; i < num; i++)
+    {
+        IntersectSphere(ray, hit, _Spheres[i]);
+    }
+
+    IntersectGroundPlane(ray, hit);
+    return hit;
+}
+
+inline float3 Shade(inout Ray ray, RayHit hit)
+{
+    if (hit.dis < 1.#INF)
+    {
+        ray.ori = hit.pos + hit.normal * 0.001f;
+        ray.dir = reflect(ray.dir, hit.normal);
+        ray.e *= hit.spec;
+
+        // shadow
+        bool shadow = false;
+        Ray shadowRay = CreateRay(hit.pos + hit.normal * 0.001f, -1 * _DirectionalLight.xyz);
+        RayHit shadowHit = Trace(shadowRay);
+        if (shadowHit.dis != 1.#INF)
+            return 0;
+
+        float nl = dot(hit.normal, _DirectionalLight.xyz);
+        float3 col = saturate(-nl * _DirectionalLight.w * hit.albedo);
+
+        return col;
+    }
+    else
+    {
+        ray.e = 0.0f;
+
+        float theta = acos(ray.dir.y) / -PI;
+        float phi = atan2(ray.dir.x, -ray.dir.z) / -PI * 0.5f;
+        return _SkyboxTex.SampleLevel(sampler_SkyboxTex, float2(phi, theta), 0).xyz;
+    }
+}
+
+[numthreads(8,8,1)]
+void CSMain (uint3 id : SV_DispatchThreadID)
+{
+    // TODO: insert actual code here!
+    uint width, height;
+
+    Result.GetDimensions(width, height);
+    float2 uv = id.xy + _PixelOffset;
+    uv /= float2(width, height) * 2.0f - 1.0f;
+
+    Ray ray = CreateCameraRay(uv);
+
+    float3 result = 0.0f;
+    for (int i = 0; i < 8; i++)
+    {
+        RayHit hit = Trace(ray);
+        result += ray.e * Shade(ray, hit);
+
+        if (!any(ray.e))
+            break;
+    }
+
+    Result[id.xy] = float4(result, 1);
+}
