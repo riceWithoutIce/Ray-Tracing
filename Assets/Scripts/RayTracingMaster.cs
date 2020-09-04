@@ -11,6 +11,8 @@ public class RayTracingMaster : MonoBehaviour
 		public float r;
 		public Vector3 albedo;
 		public Vector3 spec;
+		public float smoothness;
+		public Vector3 emission;
 	};
 
 	private const float ThreadUnit = 8.0f;
@@ -26,8 +28,12 @@ public class RayTracingMaster : MonoBehaviour
 	public Vector2 SphereRadius = new Vector2(3.0f, 8.0f);
 	public uint SphereMax = 100;
 	public float SpherePlacementRadius = 100.0f;
+	[Header("Random seed")]
+	public int RandomSeed = 0;
 
 	private RenderTexture _rtTarget;
+	// buffer
+	private RenderTexture _rtConverged;
 
 	// cmp shader
 	private int _kernelMain;
@@ -66,6 +72,13 @@ public class RayTracingMaster : MonoBehaviour
 			_rtTarget.enableRandomWrite = true;
 			_rtTarget.Create();
 		}
+
+		if (_rtConverged == null)
+		{
+			_rtConverged = new RenderTexture(Screen.width, Screen.height, 0, RenderTextureFormat.ARGBFloat, RenderTextureReadWrite.Linear);
+			_rtConverged.enableRandomWrite = true;
+			_rtConverged.Create();
+		}
 	}
 
 	private void InitComputeShader()
@@ -88,6 +101,7 @@ public class RayTracingMaster : MonoBehaviour
 
 	private void InitSpheres()
 	{
+		Random.InitState(RandomSeed);
 		List<Sphere> spheres = new List<Sphere>();
 
 		for (int i = 0; i < SphereMax; i++)
@@ -109,6 +123,11 @@ public class RayTracingMaster : MonoBehaviour
 			bool metal = Random.value < 0.5f;
 			s.albedo = metal ? Vector3.zero : new Vector3(col.r, col.g, col.b);
 			s.spec = metal ? new Vector3(col.r, col.g, col.b) : Vector3.one * 0.04f;
+			s.smoothness = Random.value;
+			if (Random.value > 0.8)
+				s.emission = new Vector3(col.r, col.g, col.b) * Random.value * 4;
+			else
+				s.emission = Vector3.zero;
 
 			spheres.Add(s);
 
@@ -116,16 +135,17 @@ public class RayTracingMaster : MonoBehaviour
 				continue;
 		}
 
-		_sphereBuffer = new ComputeBuffer(spheres.Count, 40);
+		_sphereBuffer = new ComputeBuffer(spheres.Count, 56);
 		_sphereBuffer.SetData(spheres);
 	}
 
 	private void Update()
 	{
-		if (transform.hasChanged)
+		if (transform.hasChanged || DirLight.transform.hasChanged)
 		{
 			_curSample = 0;
 			transform.hasChanged = false;
+			DirLight.transform.hasChanged = false;
 		}
 	}
 
@@ -142,23 +162,29 @@ public class RayTracingMaster : MonoBehaviour
 	private void Render(RenderTexture dest)
 	{
 		SetShaderParameters();
-		RayTracingShader.SetTexture(_kernelMain, "Result", _rtTarget);
-		// sky box
-		RayTracingShader.SetTexture(_kernelMain, "_SkyboxTex", SkyboxTexture);
+		
 		RayTracingShader.Dispatch(_kernelMain, _threadX, _threadY, 1);
 		// Graphics.Blit(_rtTarget, dest);
 
 		// acc
 		_matAcc.SetFloat("_Sample", _curSample);
-		Graphics.Blit(_rtTarget, dest, _matAcc);
+		Graphics.Blit(_rtTarget, _rtConverged, _matAcc);
+		Graphics.Blit(_rtConverged, dest);
 		_curSample++;
 	}
 
 	private void SetShaderParameters()
 	{
+		RayTracingShader.SetFloat("_Seed", Random.value);
+
 		RayTracingShader.SetMatrix("_C2W", _camera.cameraToWorldMatrix);
 		RayTracingShader.SetMatrix("_IP", _camera.projectionMatrix.inverse);
 		RayTracingShader.SetVector("_PixelOffset", new Vector2(Random.value, Random.value));
+
+		RayTracingShader.SetTexture(_kernelMain, "Result", _rtTarget);
+		// sky box
+		RayTracingShader.SetTexture(_kernelMain, "_SkyboxTex", SkyboxTexture);
+
 		// light
 		Vector3 lightDir = DirLight.transform.forward;
 		RayTracingShader.SetVector("_DirectionalLight", new Vector4(lightDir.x, lightDir.y, lightDir.z, DirLight.intensity));

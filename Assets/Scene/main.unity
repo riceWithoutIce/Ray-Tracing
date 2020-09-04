@@ -221,10 +221,11 @@ MonoBehaviour:
   DirLight: {fileID: 710879717}
   RayTracingShader: {fileID: 7200000, guid: 5c3d25e676394cb48a2156ad962da86f, type: 3}
   AccShader: {fileID: 4800000, guid: 58649f910c512ac4292c346320290a9e, type: 3}
-  SkyboxTexture: {fileID: 2800000, guid: 7d77c00725ded254e9bcda4d8e8ea7f4, type: 3}
-  SphereRadius: {x: 1, y: 3}
-  SphereMax: 50
-  SpherePlacementRadius: 20
+  SkyboxTexture: {fileID: 2800000, guid: 43750ec89c3250c48be1a37914c4aa2d, type: 3}
+  SphereRadius: {x: 5, y: 30}
+  SphereMax: 10000
+  SpherePlacementRadius: 100
+  RandomSeed: 1223832719
 --- !u!114 &484250467
 MonoBehaviour:
   m_ObjectHideFlags: 0

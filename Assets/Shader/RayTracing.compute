@@ -32,6 +32,8 @@ struct RayHit
     float3 normal;
     float3 albedo;
     float3 spec;
+    float smoothness;
+    float3 emission;
 };
 
 struct Sphere
@@ -41,10 +43,56 @@ struct Sphere
     float r;
     float3 albedo;
     float3 spec;
+    float smoothness;
+    float3 emission;
 };
 
 // spheres
 StructuredBuffer<Sphere> _Spheres;
+
+// --------------------------------------------------------------------------
+// rand
+float2 _Pixel;
+float _Seed;
+inline float Rand()
+{
+    float result = frac(sin(_Seed / 100.0f * dot(_Pixel, float2(12.9898f, 78.233f))) * 43758.5453f);
+    _Seed += 1.0f;
+    return result;
+}
+
+inline float3x3 GetTangentSpace(float3 normal)
+{
+    float3 helper = float3(1, 0, 0);
+    if (abs(normal.x) > 0.99f)
+        helper = float3(0, 0, 1);
+
+    float3 tangent = normalize(cross(normal, helper));
+    float3 binormal = normalize(cross(normal, tangent));
+    return float3x3(tangent, binormal, normal);
+}
+
+inline float3 SampleHemisphere(float3 normal, float alpha)
+{
+    float cosTheta = pow(Rand(), 1.0f / (alpha + 1.0f));
+    float sinTheta = sqrt(1.0f - cosTheta * cosTheta);
+    float phi = 2 * PI * Rand();
+    float3 tanSpaceDir = float3(cos(phi) * sinTheta, sin(phi) * sinTheta, cosTheta);
+
+    return mul(tanSpaceDir, GetTangentSpace(normal));
+}
+
+inline float sdot(float3 x, float3 y, float f = 1.0f)
+{
+    return saturate(dot(x, y) * f);
+}
+
+inline float SmoothnessToPhongAlpha(float s)
+{
+    return pow(1000.0f, s * s);
+}
+
+// --------------------------------------------------------------------------
 
 inline Ray CreateRay(float3 ori, float3 dir)
 {
@@ -72,6 +120,8 @@ inline RayHit CreateRayHit()
     hit.pos = 0.0f;
     hit.dis = 1.#INF;
     hit.normal = 0.0f;
+    hit.smoothness = 0.0f;
+    hit.emission = 0;
 
     return hit;
 }
@@ -84,8 +134,10 @@ inline void IntersectGroundPlane(Ray ray, inout RayHit hit)
         hit.dis = t;
         hit.pos = ray.ori + t * ray.dir;
         hit.normal = float3(0.0f, 1.0f, 0.0f);
-        hit.albedo = 1;
+        hit.albedo = 0.05;
         hit.spec = 0;
+        hit.smoothness = 0.0f;
+        hit.emission = 0;
     }
 }
 
@@ -106,6 +158,8 @@ inline void IntersectSphere(Ray ray, inout RayHit hit, Sphere sphere)
         hit.normal = normalize(hit.pos - sphere.pos);
         hit.albedo = sphere.albedo;
         hit.spec = sphere.spec;
+        hit.smoothness = sphere.smoothness;
+        hit.emission = sphere.emission;
     }
 }
 
@@ -124,25 +178,65 @@ inline RayHit Trace(Ray ray)
     return hit;
 }
 
+inline float Energy(float3 color)
+{
+    return dot(color, 1.0f / 3.0f);
+}
+
 inline float3 Shade(inout Ray ray, RayHit hit)
 {
     if (hit.dis < 1.#INF)
     {
+        hit.albedo = min(1.0f - hit.spec, hit.albedo);
+        float specChance = Energy(hit.spec);
+        float diffChance = Energy(hit.albedo);
+        float sum = specChance + diffChance;
+        specChance /= sum;
+        diffChance /= sum;
+
+        float roulette = Rand();
         ray.ori = hit.pos + hit.normal * 0.001f;
-        ray.dir = reflect(ray.dir, hit.normal);
-        ray.e *= hit.spec;
+        if (roulette < specChance)
+        {
+            // ray.dir = reflect(ray.dir, hit.normal);
+            float alpha = SmoothnessToPhongAlpha(hit.smoothness);
+            ray.dir = SampleHemisphere(reflect(ray.dir, hit.normal), alpha);
+            float f = (alpha + 2) / (alpha + 1);
+            ray.e *= (1.0 / specChance) * hit.spec * sdot(hit.normal, ray.dir, f);
+        }
+        else
+        {
+            ray.dir = SampleHemisphere(hit.normal, 1.0f);
+            ray.e *= (1.0 / diffChance) * 2 * hit.albedo;
+        }
+        return hit.emission;
 
-        // shadow
-        bool shadow = false;
-        Ray shadowRay = CreateRay(hit.pos + hit.normal * 0.001f, -1 * _DirectionalLight.xyz);
-        RayHit shadowHit = Trace(shadowRay);
-        if (shadowHit.dis != 1.#INF)
-            return 0;
+        // ray.ori = hit.pos + hit.normal * 0.001f;
+        // float3 reflected = reflect(ray.dir, hit.normal);
+        // ray.dir = SampleHemisphere(hit.normal);
+        // float3 diff = 2 * min(1.0 - hit.spec, hit.albedo);
+        // float alpha = 300.0f;
+        // float3 spec = hit.spec * (alpha + 2) * pow(sdot(ray.dir, reflected), alpha);
+        // ray.e *= (diff + spec) * sdot(hit.normal, ray.dir);
+        // return 0.0f;
 
-        float nl = dot(hit.normal, _DirectionalLight.xyz);
-        float3 col = saturate(-nl * _DirectionalLight.w * hit.albedo);
+        // ray.ori = hit.pos + hit.normal * 0.001f;
+        // ray.dir = reflect(ray.dir, hit.normal);
+        // ray.e *= hit.spec;
 
-        return col;
+        // // shadow
+        // bool shadow = false;
+        // Ray shadowRay = CreateRay(hit.pos + hit.normal * 0.001f, -1 * _DirectionalLight.xyz);
+        // RayHit shadowHit = Trace(shadowRay);
+        // if (shadowHit.dis != 1.#INF)
+        // {
+        //        return 0.0f;
+        // }
+
+        // float nl = dot(hit.normal, _DirectionalLight.xyz);
+        // float3 col = saturate(-nl * _DirectionalLight.w * hit.albedo);
+
+        // return col;
     }
     else
     {
@@ -159,6 +253,7 @@ void CSMain (uint3 id : SV_DispatchThreadID)
 {
     // TODO: insert actual code here!
     uint width, height;
+    _Pixel = id.xy;
 
     Result.GetDimensions(width, height);
     float2 uv = id.xy + _PixelOffset;
