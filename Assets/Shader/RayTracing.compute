@@ -1,6 +1,6 @@
 ﻿// Each #kernel tells which function to compile; you can have many kernels
 #pragma kernel CSMain
-
+#include "Utils.cginc"
 // Create a RenderTexture with enableRandomWrite flag and set it
 // with cs.SetTexture
 RWTexture2D<float4> Result;
@@ -47,8 +47,18 @@ struct Sphere
     float3 emission;
 };
 
-// spheres
+// objs
+struct MeshObj
+{
+    float4x4 local2WorldMatrix;
+    int indices_offset;
+    int indices_count;
+};
+
 StructuredBuffer<Sphere> _Spheres;
+StructuredBuffer<MeshObj> _MeshObjs;
+StructuredBuffer<float3> _Vertices;
+StructuredBuffer<int> _Indices;
 
 // --------------------------------------------------------------------------
 // rand
@@ -90,6 +100,40 @@ inline float sdot(float3 x, float3 y, float f = 1.0f)
 inline float SmoothnessToPhongAlpha(float s)
 {
     return pow(1000.0f, s * s);
+}
+
+// --------------------------------------------------------------------------
+
+static const float EPSILON = 1e-8;
+inline bool IntersectTriangle_MT97(Ray ray, float3 vert0, float3 vert1, float3 vert2,
+    inout float t, inout float u, inout float v)
+{
+    // find vectors for two edges sharing vert0
+    float3 edge1 = vert1 - vert0;
+    float3 edge2 = vert2 - vert0;
+    // begin calculating determinant - also used to calculate U parameter
+    float3 pvec = cross(ray.dir, edge2);
+    // if determinant is near zero, ray lies in plane of triangle
+    float det = dot(edge1, pvec);
+    // use backface culling
+    if (det < EPSILON)
+        return false;
+    float inv_det = 1.0f / det;
+    // calculate distance from vert0 to ray origin
+    float3 tvec = ray.ori - vert0;
+    // calculate U parameter and test bounds
+    u = dot(tvec, pvec) * inv_det;
+    if (u < 0.0 || u > 1.0f)
+        return false;
+    // prepare to test V parameter
+    float3 qvec = cross(tvec, edge1);
+    // calculate V parameter and test bounds
+    v = dot(ray.dir, qvec) * inv_det;
+    if (v < 0.0 || u + v > 1.0f)
+        return false;
+    // calculate t, ray intersects triangle
+    t = dot(edge2, qvec) * inv_det;
+    return true;
 }
 
 // --------------------------------------------------------------------------
@@ -163,18 +207,54 @@ inline void IntersectSphere(Ray ray, inout RayHit hit, Sphere sphere)
     }
 }
 
+inline void IntersectMeshObj(Ray ray, inout RayHit hit, MeshObj meshObj)
+{
+    uint offset = meshObj.indices_offset;
+    uint count = offset + meshObj.indices_count;
+    for (int i = offset; i < count; i += 3)
+    {
+        float3 v0 = (mul(meshObj.local2WorldMatrix, float4(_Vertices[_Indices[i]], 1))).xyz;
+        float3 v1 = (mul(meshObj.local2WorldMatrix, float4(_Vertices[_Indices[i + 1]], 1))).xyz;
+        float3 v2 = (mul(meshObj.local2WorldMatrix, float4(_Vertices[_Indices[i + 2]], 1))).xyz;
+
+        float t, u, v;
+        if (IntersectTriangle_MT97(ray, v0, v1, v2, t, u, v))
+        {
+            if (t > 0 && t < hit.dis)
+            {
+                hit.dis = t;
+                hit.pos = ray.ori + t * ray.dir;
+                hit.normal = normalize(cross(v1 - v0, v2 - v0));
+                hit.albedo = float3(0.87, 0.75, 0.3);
+                hit.spec = 0.0f;
+                hit.smoothness = 0.6f;
+                hit.emission = 0.1;
+            }
+        }
+    }
+}
+
 inline RayHit Trace(Ray ray)
 {
     RayHit hit = CreateRayHit();
-
     uint num, stride;
+
+    IntersectGroundPlane(ray, hit);
+
+    // 
     _Spheres.GetDimensions(num, stride);
     for (uint i = 0; i < num; i++)
     {
         IntersectSphere(ray, hit, _Spheres[i]);
     }
 
-    IntersectGroundPlane(ray, hit);
+    //
+    _MeshObjs.GetDimensions(num, stride);
+    for (int i = 0; i < num; i++)
+    {
+        IntersectMeshObj(ray, hit, _MeshObjs[i]);
+    }
+
     return hit;
 }
 
